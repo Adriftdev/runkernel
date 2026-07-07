@@ -142,6 +142,13 @@ pub enum PipelineEvent {
 
 pub type EventCallback = Arc<dyn Fn(PipelineEvent) + Send + Sync>;
 
+/// Options supplied to a pipeline run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunOptions {
+    /// Arguments forwarded by a CLI or caller for workflow code to interpret.
+    pub args: Vec<String>,
+}
+
 pub struct Pipeline {
     pub name: String,
     pub tasks: HashMap<String, Task>,
@@ -158,6 +165,7 @@ struct RunShared {
     outputs: OutputStore,
     completed: CompletedStore,
     default_shell: Shell,
+    options: RunOptions,
 }
 
 impl Pipeline {
@@ -343,6 +351,11 @@ impl Pipeline {
 
     /// Runs the pipeline and returns structured execution results.
     pub async fn run(self) -> anyhow::Result<PipelineResult> {
+        self.run_with_options(RunOptions::default()).await
+    }
+
+    /// Runs the pipeline with explicit run options available through [`Context::args`].
+    pub async fn run_with_options(self, options: RunOptions) -> anyhow::Result<PipelineResult> {
         let event_cb = self.event_callback.clone();
         find_execution_order(&self.tasks)?;
 
@@ -380,6 +393,7 @@ impl Pipeline {
             outputs: Arc::new(RwLock::new(HashMap::new())),
             completed: Arc::new(RwLock::new(HashSet::new())),
             default_shell: self.shell.clone(),
+            options,
         };
 
         let mut active = FuturesUnordered::new();
@@ -523,7 +537,18 @@ impl Pipeline {
     }
 
     /// Runs one task and its dependency closure.
-    pub async fn run_task(mut self, task: &str) -> anyhow::Result<PipelineResult> {
+    pub async fn run_task(self, task: &str) -> anyhow::Result<PipelineResult> {
+        self.run_task_with_options(task, RunOptions::default())
+            .await
+    }
+
+    /// Runs one task and its dependency closure with explicit run options available through
+    /// [`Context::args`].
+    pub async fn run_task_with_options(
+        mut self,
+        task: &str,
+        options: RunOptions,
+    ) -> anyhow::Result<PipelineResult> {
         if !self.tasks.contains_key(task) {
             let mut available: Vec<_> = self.tasks.keys().cloned().collect();
             available.sort();
@@ -537,7 +562,7 @@ impl Pipeline {
         let mut needed = HashSet::new();
         collect_dependencies(task, &self.tasks, &mut needed)?;
         self.tasks.retain(|name, _| needed.contains(name));
-        self.run().await
+        self.run_with_options(options).await
     }
 }
 
@@ -661,6 +686,7 @@ async fn execute_task(
                 name.clone(),
                 shared.pipeline_name.clone(),
                 shared.workspace_root.clone(),
+                shared.options.args.clone(),
                 Arc::clone(&shared.outputs),
                 Arc::clone(&shared.completed),
             );
@@ -727,6 +753,7 @@ async fn rollback_task(
         name.to_string(),
         shared.pipeline_name.clone(),
         shared.workspace_root.clone(),
+        shared.options.args.clone(),
         Arc::clone(&shared.outputs),
         Arc::clone(&shared.completed),
     );
@@ -1085,6 +1112,151 @@ mod tests {
         assert_eq!(status(&res, "build"), TaskStatus::Completed);
         assert_eq!(status(&res, "deploy"), TaskStatus::Completed);
         assert!(!UNRELATED_RAN.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_run_with_options_exposes_args_to_context() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let first = Arc::clone(&captured);
+        let second = Arc::clone(&captured);
+
+        let mut p = Pipeline::new("args");
+        p.add(Task::new("build").exec_fn(move |ctx| {
+            let first = Arc::clone(&first);
+            async move {
+                first.lock().unwrap().push(ctx.args().to_vec());
+                Ok(())
+            }
+        }));
+        p.add(
+            Task::new("deploy")
+                .depends_on(&["build"])
+                .exec_fn(move |ctx| {
+                    let second = Arc::clone(&second);
+                    async move {
+                        second.lock().unwrap().push(ctx.args().to_vec());
+                        Ok(())
+                    }
+                }),
+        );
+
+        let res = p
+            .run_with_options(RunOptions {
+                args: vec!["--target".to_string(), "prod".to_string()],
+            })
+            .await
+            .unwrap();
+
+        assert!(res.summary.success);
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert!(captured
+            .iter()
+            .all(|args| args == &vec!["--target".to_string(), "prod".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_run_task_with_options_exposes_args_to_dependency_closure() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let build = Arc::clone(&captured);
+        let deploy = Arc::clone(&captured);
+
+        let mut p = Pipeline::new("selected-args");
+        p.add(Task::new("build").exec_fn(move |ctx| {
+            let build = Arc::clone(&build);
+            async move {
+                build
+                    .lock()
+                    .unwrap()
+                    .push((ctx.name().to_string(), ctx.args().to_vec()));
+                Ok(())
+            }
+        }));
+        p.add(
+            Task::new("deploy")
+                .depends_on(&["build"])
+                .exec_fn(move |ctx| {
+                    let deploy = Arc::clone(&deploy);
+                    async move {
+                        deploy
+                            .lock()
+                            .unwrap()
+                            .push((ctx.name().to_string(), ctx.args().to_vec()));
+                        Ok(())
+                    }
+                }),
+        );
+
+        let res = p
+            .run_task_with_options(
+                "deploy",
+                RunOptions {
+                    args: vec!["--dry-run".to_string()],
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(res.summary.success);
+        let mut captured = captured.lock().unwrap().clone();
+        captured.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            captured,
+            vec![
+                ("build".to_string(), vec!["--dry-run".to_string()]),
+                ("deploy".to_string(), vec!["--dry-run".to_string()])
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_run_options_are_empty() {
+        let captured = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&captured);
+        let mut p = Pipeline::new("empty-args");
+        p.add(Task::new("task").exec_fn(move |ctx| {
+            let seen = Arc::clone(&seen);
+            async move {
+                *seen.lock().unwrap() = Some(ctx.args().to_vec());
+                Ok(())
+            }
+        }));
+
+        let res = p.run().await.unwrap();
+
+        assert!(res.summary.success);
+        assert_eq!(*captured.lock().unwrap(), Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn test_rollback_context_receives_run_options() {
+        let captured = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&captured);
+        let mut p = Pipeline::new("rollback-args");
+        p.add(
+            Task::new("fail")
+                .exec_fn(|_| async move { anyhow::bail!("nope") })
+                .rollback(move |ctx| {
+                    let seen = Arc::clone(&seen);
+                    async move {
+                        *seen.lock().unwrap() = Some(ctx.args().to_vec());
+                        Ok(())
+                    }
+                }),
+        );
+
+        let res = p
+            .run_with_options(RunOptions {
+                args: vec!["--target".to_string(), "test".to_string()],
+            })
+            .await
+            .unwrap();
+
+        assert!(!res.summary.success);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(vec!["--target".to_string(), "test".to_string()])
+        );
     }
 
     #[tokio::test]

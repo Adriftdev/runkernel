@@ -71,7 +71,19 @@ fn pipeline() -> Pipeline {
         Task::new("deploy-edge")
             .description("Deploy to edge device")
             .depends_on(&["build-wasm"])
-            .exec("sh scripts/flash_board.sh")
+            .exec_fn(|ctx: Context| async move {
+                let script = ctx.workspace_root().join("scripts/flash_board.sh");
+                let status = tokio::process::Command::new("sh")
+                    .arg(&script)
+                    .status()
+                    .await?;
+
+                if !status.success() {
+                    anyhow::bail!("flash script failed: {status}");
+                }
+
+                Ok(())
+            })
             .on_failure(|_ctx| async move {
                 println!("Deploy failed. Rolling back edge node to last known good state.");
                 crate::recovery::flash_fallback_firmware().await;

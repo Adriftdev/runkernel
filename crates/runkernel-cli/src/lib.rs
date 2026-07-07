@@ -1,12 +1,13 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use runkernel::{CacheManager, GraphEdge, PipelineGraph};
-use runkernel_cli_support::{graph_to_text, ExplainResponse, ListResponse};
+use runkernel_cli_support::{graph_to_text, ExplainResponse, ListResponse, MetadataResponse};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitStatus};
 
 const CONFIG_FILE: &str = "runkernel.toml";
+const EXPECTED_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Parser)]
 #[command(name = "runkernel")]
@@ -134,6 +135,7 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<CliOutcome> {
         }
         Command::List => {
             let workflow = selected_workflow(&cli)?;
+            validate_protocol(&workflow, ProtocolCapability::List, &cli)?;
             let response: ListResponse = run_protocol_json(
                 &workflow,
                 &["__runkernel", "list", "--format", "json"],
@@ -143,6 +145,7 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<CliOutcome> {
         }
         Command::Graph { format } => {
             let workflow = selected_workflow(&cli)?;
+            validate_protocol(&workflow, ProtocolCapability::Graph, &cli)?;
             let graph: PipelineGraph = run_protocol_json(
                 &workflow,
                 &["__runkernel", "graph", "--format", "json"],
@@ -156,12 +159,38 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<CliOutcome> {
         }
         Command::Explain { task } => {
             let workflow = selected_workflow(&cli)?;
+            validate_protocol(&workflow, ProtocolCapability::Explain, &cli)?;
             let response: ExplainResponse = run_protocol_json(
                 &workflow,
                 &["__runkernel", "explain", task, "--format", "json"],
                 &cli,
             )?;
             Ok(CliOutcome::success(format_explain(&response)))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProtocolCapability {
+    List,
+    Graph,
+    Explain,
+}
+
+impl ProtocolCapability {
+    fn name(self) -> &'static str {
+        match self {
+            ProtocolCapability::List => "list",
+            ProtocolCapability::Graph => "graph",
+            ProtocolCapability::Explain => "explain",
+        }
+    }
+
+    fn supported_by(self, metadata: &MetadataResponse) -> bool {
+        match self {
+            ProtocolCapability::List => metadata.supports.list,
+            ProtocolCapability::Graph => metadata.supports.graph,
+            ProtocolCapability::Explain => metadata.supports.explain,
         }
     }
 }
@@ -418,6 +447,7 @@ where
     T: serde::de::DeserializeOwned,
 {
     let protocol_args: Vec<_> = protocol_args.iter().map(|arg| arg.to_string()).collect();
+    let metadata_request = is_metadata_request(&protocol_args);
     let mut command = build_cargo_command(workflow, &protocol_args, cli);
     let output = command.output().map_err(|e| {
         anyhow::anyhow!(
@@ -427,6 +457,15 @@ where
         )
     })?;
     if !output.status.success() {
+        if metadata_request {
+            anyhow::bail!(
+                "Failed to run workflow '{}' through Cargo while checking the runkernel protocol.\n\n{}\n\nWorkflow exited with status {}.\n{}",
+                workflow.name,
+                protocol_not_supported_message(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         anyhow::bail!(
             "Failed to run workflow '{}' through Cargo.\n{}",
             workflow.name,
@@ -434,6 +473,15 @@ where
         );
     }
     serde_json::from_slice(&output.stdout).map_err(|e| {
+        if metadata_request {
+            return anyhow::anyhow!(
+                "{}\n\nInvalid metadata JSON from workflow '{}': {}\n{}",
+                protocol_not_supported_message(),
+                workflow.name,
+                e,
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
         anyhow::anyhow!(
             "Workflow '{}' returned invalid protocol JSON: {}\n{}",
             workflow.name,
@@ -441,6 +489,54 @@ where
             String::from_utf8_lossy(&output.stdout)
         )
     })
+}
+
+fn validate_protocol(
+    workflow: &ResolvedWorkflow,
+    capability: ProtocolCapability,
+    cli: &Cli,
+) -> anyhow::Result<()> {
+    let metadata: MetadataResponse = run_protocol_json(
+        workflow,
+        &["__runkernel", "metadata", "--format", "json"],
+        cli,
+    )?;
+    validate_metadata_response(&workflow.name, &metadata, capability)
+}
+
+fn validate_metadata_response(
+    workflow_name: &str,
+    metadata: &MetadataResponse,
+    capability: ProtocolCapability,
+) -> anyhow::Result<()> {
+    if metadata.protocol_version != EXPECTED_PROTOCOL_VERSION {
+        anyhow::bail!(
+            "Unsupported runkernel protocol version for workflow '{}'. Expected {}, got {}.",
+            workflow_name,
+            EXPECTED_PROTOCOL_VERSION,
+            metadata.protocol_version
+        );
+    }
+    if !capability.supported_by(&metadata) {
+        anyhow::bail!(
+            "Workflow '{}' is missing required runkernel protocol capability '{}'.",
+            workflow_name,
+            capability.name()
+        );
+    }
+    Ok(())
+}
+
+fn is_metadata_request(args: &[String]) -> bool {
+    args.len() == 4
+        && args[0] == "__runkernel"
+        && args[1] == "metadata"
+        && args[2] == "--format"
+        && args[3] == "json"
+}
+
+fn protocol_not_supported_message() -> &'static str {
+    "Workflow binary does not appear to support the runkernel protocol.\n\nExpected:\n  __runkernel metadata --format json\n\nCheck that the binary uses:\n  runkernel_cli_support::RunkernelApp"
 }
 
 fn exit_code(status: ExitStatus) -> i32 {
@@ -487,17 +583,17 @@ fn format_graph(
 }
 
 fn graph_to_dot(workflow: &str, graph: &PipelineGraph) -> anyhow::Result<String> {
-    let mut output = format!("digraph \"{}\" {{\n  rankdir=LR;\n", workflow);
+    let mut output = format!("digraph \"{}\" {{\n  rankdir=LR;\n", dot_escape(workflow));
     for node in &graph.nodes {
         output.push_str("  \"");
-        output.push_str(&node.id);
+        output.push_str(&dot_escape(&node.id));
         output.push_str("\";\n");
     }
     for GraphEdge { from, to } in &graph.edges {
         output.push_str("  \"");
-        output.push_str(from);
+        output.push_str(&dot_escape(from));
         output.push_str("\" -> \"");
-        output.push_str(to);
+        output.push_str(&dot_escape(to));
         output.push_str("\";\n");
     }
     output.push_str("}\n");
@@ -506,13 +602,44 @@ fn graph_to_dot(workflow: &str, graph: &PipelineGraph) -> anyhow::Result<String>
 
 fn graph_to_mermaid(graph: &PipelineGraph) -> String {
     let mut output = String::from("graph TD");
+    for node in &graph.nodes {
+        output.push_str("\n  ");
+        output.push_str(&mermaid_id(&node.id));
+        output.push_str("[\"");
+        output.push_str(&mermaid_label(&node.label));
+        output.push_str("\"]");
+    }
     for edge in &graph.edges {
         output.push_str("\n  ");
-        output.push_str(&edge.from);
+        output.push_str(&mermaid_id(&edge.from));
         output.push_str(" --> ");
-        output.push_str(&edge.to);
+        output.push_str(&mermaid_id(&edge.to));
     }
     output
+}
+
+fn dot_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn mermaid_id(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        && !value.is_empty()
+    {
+        return value.to_string();
+    }
+
+    let mut id = String::from("task_");
+    for byte in value.as_bytes() {
+        id.push_str(&format!("{byte:02x}"));
+    }
+    id
+}
+
+fn mermaid_label(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn format_explain(response: &ExplainResponse) -> String {
@@ -543,7 +670,7 @@ mod tests {
     use super::*;
     use clap::Parser;
     use runkernel::{GraphNode, TaskExplanation};
-    use runkernel_cli_support::{ExplainResponse, TaskListItem};
+    use runkernel_cli_support::{ExplainResponse, ProtocolSupport, TaskListItem};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -739,7 +866,7 @@ package = "ops"
         };
         assert_eq!(
             format_graph("ops", &graph, GraphFormat::Text).unwrap(),
-            "lint -> test"
+            "Tasks:\n  lint\n  test\n\nEdges:\n  lint -> test"
         );
         assert!(format_graph("ops", &graph, GraphFormat::Dot)
             .unwrap()
@@ -747,6 +874,91 @@ package = "ops"
         assert!(format_graph("ops", &graph, GraphFormat::Mermaid)
             .unwrap()
             .contains("lint --> test"));
+    }
+
+    #[test]
+    fn test_format_graph_includes_isolated_nodes() {
+        let graph = PipelineGraph {
+            nodes: vec![GraphNode {
+                id: "build".to_string(),
+                label: "build".to_string(),
+            }],
+            edges: Vec::new(),
+        };
+
+        assert_eq!(
+            format_graph("ops", &graph, GraphFormat::Text).unwrap(),
+            "Tasks:\n  build"
+        );
+        assert!(format_graph("ops", &graph, GraphFormat::Dot)
+            .unwrap()
+            .contains("\"build\";"));
+        assert_eq!(
+            format_graph("ops", &graph, GraphFormat::Mermaid).unwrap(),
+            "graph TD\n  build[\"build\"]"
+        );
+    }
+
+    #[test]
+    fn test_graph_dot_escapes_quotes_and_backslashes() {
+        let graph = PipelineGraph {
+            nodes: vec![GraphNode {
+                id: "build\\\"quoted".to_string(),
+                label: "build".to_string(),
+            }],
+            edges: Vec::new(),
+        };
+
+        let dot = format_graph("ops\\\"workflow", &graph, GraphFormat::Dot).unwrap();
+
+        assert!(dot.contains("digraph \"ops\\\\\\\"workflow\""));
+        assert!(dot.contains("\"build\\\\\\\"quoted\";"));
+    }
+
+    fn metadata_with_support(protocol_version: u32, support: ProtocolSupport) -> MetadataResponse {
+        MetadataResponse {
+            protocol_version,
+            workflow_name: "ops".to_string(),
+            description: None,
+            runkernel_version: "0.1.0".to_string(),
+            supports: support,
+        }
+    }
+
+    fn all_support() -> ProtocolSupport {
+        ProtocolSupport {
+            list: true,
+            graph: true,
+            explain: true,
+            run_task: true,
+            run_all: true,
+        }
+    }
+
+    #[test]
+    fn test_validate_metadata_rejects_unsupported_protocol_version() {
+        let err = validate_metadata_response(
+            "ops",
+            &metadata_with_support(2, all_support()),
+            ProtocolCapability::List,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Expected 1, got 2"));
+    }
+
+    #[test]
+    fn test_validate_metadata_rejects_missing_capability() {
+        let mut support = all_support();
+        support.graph = false;
+        let err = validate_metadata_response(
+            "ops",
+            &metadata_with_support(1, support),
+            ProtocolCapability::Graph,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("capability 'graph'"));
     }
 
     #[test]

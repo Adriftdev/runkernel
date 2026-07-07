@@ -1,4 +1,4 @@
-use runkernel::{Pipeline, PipelineGraph, TaskExplanation};
+use runkernel::{Pipeline, PipelineGraph, RunOptions, TaskExplanation};
 use serde::{Deserialize, Serialize};
 
 const PROTOCOL_COMMAND: &str = "__runkernel";
@@ -86,16 +86,33 @@ impl RunkernelApp {
                 })
             }
             Some("run") => {
-                let task = args.get(2).filter(|value| value.as_str() != "--").cloned();
+                let (task, forwarded_args) = parse_run_command(&args[2..])?;
+                let options = RunOptions {
+                    args: forwarded_args,
+                };
                 let result = match task {
-                    Some(task) => self.pipeline.run_task(&task).await?,
-                    None => self.pipeline.run().await?,
+                    Some(task) => self.pipeline.run_task_with_options(&task, options).await?,
+                    None => self.pipeline.run_with_options(options).await?,
                 };
                 finish_result(result)
             }
             Some(other) => anyhow::bail!("Unknown __runkernel command '{}'", other),
             None => anyhow::bail!("Missing __runkernel command"),
         }
+    }
+}
+
+fn parse_run_command(args: &[String]) -> anyhow::Result<(Option<String>, Vec<String>)> {
+    match args {
+        [] => Ok((None, Vec::new())),
+        [separator, rest @ ..] if separator == "--" => Ok((None, rest.to_vec())),
+        [task] => Ok((Some(task.clone()), Vec::new())),
+        [task, separator, rest @ ..] if separator == "--" => Ok((Some(task.clone()), rest.to_vec())),
+        [task, unexpected, ..] => anyhow::bail!(
+            "Unexpected argument '{}' for __runkernel run task '{}'. Forwarded arguments must follow '--'",
+            unexpected,
+            task
+        ),
     }
 }
 
@@ -157,18 +174,28 @@ fn finish_result(result: runkernel::PipelineResult) -> anyhow::Result<()> {
 }
 
 pub fn graph_to_text(graph: &PipelineGraph) -> String {
-    graph
-        .edges
-        .iter()
-        .map(|edge| format!("{} -> {}", edge.from, edge.to))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut output = String::from("Tasks:");
+    for node in &graph.nodes {
+        output.push_str("\n  ");
+        output.push_str(&node.id);
+    }
+    if !graph.edges.is_empty() {
+        output.push_str("\n\nEdges:");
+        for edge in &graph.edges {
+            output.push_str("\n  ");
+            output.push_str(&edge.from);
+            output.push_str(" -> ");
+            output.push_str(&edge.to);
+        }
+    }
+    output
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use runkernel::Task;
+    use std::sync::{Arc, Mutex};
 
     fn pipeline() -> Pipeline {
         let mut pipeline = Pipeline::new("support-test");
@@ -201,6 +228,83 @@ mod tests {
     #[test]
     fn test_graph_to_text() {
         let graph = pipeline().graph().unwrap();
-        assert_eq!(graph_to_text(&graph), "lint -> test");
+        assert_eq!(
+            graph_to_text(&graph),
+            "Tasks:\n  lint\n  test\n\nEdges:\n  lint -> test"
+        );
+    }
+
+    #[test]
+    fn test_graph_to_text_includes_isolated_node() {
+        let mut pipeline = Pipeline::new("isolated");
+        pipeline.add(Task::new("build").exec("true"));
+        let graph = pipeline.graph().unwrap();
+        assert_eq!(graph_to_text(&graph), "Tasks:\n  build");
+    }
+
+    #[test]
+    fn test_parse_run_command_forwards_default_workflow_args() {
+        let parsed =
+            parse_run_command(&["--".to_string(), "--target".to_string(), "prod".to_string()])
+                .unwrap();
+        assert_eq!(
+            parsed,
+            (None, vec!["--target".to_string(), "prod".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_run_command_forwards_task_args() {
+        let parsed = parse_run_command(&[
+            "deploy".to_string(),
+            "--".to_string(),
+            "--dry-run".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed,
+            (Some("deploy".to_string()), vec!["--dry-run".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_parse_run_command_without_forwarded_args() {
+        assert_eq!(
+            parse_run_command(&["deploy".to_string()]).unwrap(),
+            (Some("deploy".to_string()), Vec::new())
+        );
+        assert_eq!(parse_run_command(&[]).unwrap(), (None, Vec::new()));
+    }
+
+    #[test]
+    fn test_parse_run_command_rejects_unseparated_extra_args() {
+        let err = parse_run_command(&["deploy".to_string(), "--target".to_string()]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Forwarded arguments must follow '--'"));
+    }
+
+    #[tokio::test]
+    async fn test_run_protocol_forwards_args_to_context() {
+        let captured = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&captured);
+        let mut pipeline = Pipeline::new("support-args");
+        pipeline.add(Task::new("deploy").exec_fn(move |ctx| {
+            let seen = Arc::clone(&seen);
+            async move {
+                *seen.lock().unwrap() = Some(ctx.args().to_vec());
+                Ok(())
+            }
+        }));
+
+        RunkernelApp::new(pipeline)
+            .run_from(["__runkernel", "run", "deploy", "--", "--target", "prod"])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(vec!["--target".to_string(), "prod".to_string()])
+        );
     }
 }

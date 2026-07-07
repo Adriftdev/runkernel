@@ -102,6 +102,7 @@ impl CacheManager {
         pipeline_name: &str,
         task: &Task,
     ) -> anyhow::Result<CacheEligibility> {
+        let is_native_function = matches!(task.action, Some(TaskAction::Fn(_)));
         match &task.cache_mode {
             CacheMode::Disabled => {
                 return Ok(CacheEligibility::Disabled(
@@ -109,6 +110,12 @@ impl CacheManager {
                 ));
             }
             CacheMode::Inputs if task.inputs.is_empty() && task.env_vars.is_empty() => {
+                if is_native_function {
+                    return Ok(CacheEligibility::Disabled(
+                        "native function task cache disabled: no declared inputs, environment variables, or explicit cache key; closure body is not hashed"
+                            .to_string(),
+                    ));
+                }
                 return Ok(CacheEligibility::Disabled(
                     "no declared file inputs, environment variables, or explicit cache key"
                         .to_string(),
@@ -202,10 +209,20 @@ impl CacheManager {
 
         Ok(CacheEligibility::Enabled {
             hash: hex::encode(hasher.finalize()),
-            reason: match &task.cache_mode {
-                CacheMode::Explicit { .. } => "explicit cache key and declared inputs".to_string(),
-                CacheMode::Inputs => "declared inputs or environment variables".to_string(),
-                CacheMode::Disabled => unreachable!(),
+            reason: match (&task.cache_mode, is_native_function) {
+                (CacheMode::Explicit { .. }, true) => {
+                    "explicit cache key for native function task; closure body is not hashed"
+                        .to_string()
+                }
+                (CacheMode::Inputs, true) => {
+                    "native function task cache uses declared inputs/env only; closure body is not hashed"
+                        .to_string()
+                }
+                (CacheMode::Explicit { .. }, false) => {
+                    "explicit cache key and declared inputs".to_string()
+                }
+                (CacheMode::Inputs, false) => "declared inputs or environment variables".to_string(),
+                (CacheMode::Disabled, _) => unreachable!(),
             },
         })
     }
@@ -342,7 +359,13 @@ fn task_file_name(task_name: &str) -> String {
     if sanitized.is_empty() {
         sanitized.push_str("task");
     }
-    sanitized
+    format!("{}-{}", sanitized, task_name_hash(task_name))
+}
+
+fn task_name_hash(task_name: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(task_name.as_bytes());
+    hex::encode(hasher.finalize())[..16].to_string()
 }
 
 fn should_ignore_path(path: &Path) -> bool {
@@ -431,6 +454,17 @@ mod tests {
     }
 
     #[test]
+    fn test_task_file_name_adds_hash_suffix_to_avoid_collisions() {
+        let slash = task_file_name("foo/bar");
+        let underscore = task_file_name("foo_bar");
+
+        assert_ne!(slash, underscore);
+        assert!(slash.starts_with("foo_bar-"));
+        assert!(underscore.starts_with("foo_bar-"));
+        assert!(!slash.ends_with(".json"));
+    }
+
+    #[test]
     fn test_shell_command_changes_hash() {
         let manager = CacheManager::new();
         let first = match manager
@@ -454,6 +488,52 @@ mod tests {
             CacheEligibility::Disabled(_) => panic!("task should be cacheable"),
         };
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_native_function_without_identity_is_not_cacheable_and_explains_why() {
+        let manager = CacheManager::new();
+        let task = Task::new("native").exec_fn(|_| async move { Ok(()) });
+
+        let reason = match manager.compute_hash("pipeline", &task).unwrap() {
+            CacheEligibility::Disabled(reason) => reason,
+            CacheEligibility::Enabled { .. } => panic!("task should not be cacheable"),
+        };
+
+        assert!(reason.contains("native function task cache disabled"));
+        assert!(reason.contains("closure body is not hashed"));
+    }
+
+    #[test]
+    fn test_native_function_with_inputs_explains_closure_is_not_hashed() {
+        let manager = CacheManager::new();
+        let task = Task::new("native")
+            .exec_fn(|_| async move { Ok(()) })
+            .env_vars(&["RUNKERNEL_NATIVE_CACHE_REASON"]);
+
+        let reason = match manager.compute_hash("pipeline", &task).unwrap() {
+            CacheEligibility::Enabled { reason, .. } => reason,
+            CacheEligibility::Disabled(_) => panic!("task should be cacheable"),
+        };
+
+        assert!(reason.contains("declared inputs/env only"));
+        assert!(reason.contains("closure body is not hashed"));
+    }
+
+    #[test]
+    fn test_native_function_with_explicit_key_explains_closure_is_not_hashed() {
+        let manager = CacheManager::new();
+        let task = Task::new("native")
+            .exec_fn(|_| async move { Ok(()) })
+            .cache_key("native-v1");
+
+        let reason = match manager.compute_hash("pipeline", &task).unwrap() {
+            CacheEligibility::Enabled { reason, .. } => reason,
+            CacheEligibility::Disabled(_) => panic!("task should be cacheable"),
+        };
+
+        assert!(reason.contains("explicit cache key for native function task"));
+        assert!(reason.contains("closure body is not hashed"));
     }
 
     #[test]

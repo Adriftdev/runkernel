@@ -48,11 +48,12 @@ use runkernel::{Context, Task};
 pipeline.add(Task::new("build-wasm").exec_fn(|ctx: Context| async move {
     let target = ctx.env("TARGET_ENV")?;
     println!("building for {target}");
+    println!("forwarded args: {:?}", ctx.args());
     Ok(())
 }));
 ```
 
-Native tasks can use normal Rust libraries, typed environment parsing, and task outputs.
+Native tasks can use normal Rust libraries, typed environment parsing, forwarded run arguments, and task outputs.
 
 ## Caching
 
@@ -66,9 +67,9 @@ pipeline.add(
 );
 ```
 
-Cache entries are scoped by pipeline namespace and task name under `.runkernel/cache/{pipeline_hash}/`. Cache identity includes the pipeline name, task name, declared dependencies, shell command, explicit cache key, declared environment values, matched file paths, and file contents.
+Cache entries are scoped by pipeline namespace under `.runkernel/cache/{pipeline_hash}/`. Task cache filenames use a readable sanitized task name plus a hash suffix, such as `build-a31f95c02a19e0dd.json`, to avoid collisions between names like `foo/bar` and `foo_bar`. Cache identity includes the pipeline name, task name, declared dependencies, shell command, explicit cache key, declared environment values, matched file paths, and file contents.
 
-Native function tasks should use `.cache_key(...)` when they opt into caching because runkernel cannot hash closure logic.
+Native function tasks should use `.cache_key(...)`, `.inputs(...)`, or `.env_vars(...)` when they opt into caching because runkernel cannot hash closure logic. Cache reasons for function tasks call this out explicitly.
 
 ## Outputs
 
@@ -143,6 +144,7 @@ cargo run -p runkernel-cli -- list
 cargo run -p runkernel-cli -- graph
 cargo run -p runkernel-cli -- explain deploy-edge
 cargo run -p runkernel-cli -- run deploy-edge
+cargo run -p runkernel-cli -- run deploy-edge -- --target prod --dry-run
 cargo run -p runkernel-cli -- cache status
 cargo run -p runkernel-cli -- cache clean
 ```
@@ -159,14 +161,14 @@ default_task = "deploy-edge"
 description = "Example ops workflow"
 ```
 
-The CLI discovers `runkernel.toml` by walking up from the current directory. It delegates to the configured Cargo binary with the internal `__runkernel` protocol for list, graph, explain, and selected task execution. Workflow binaries use `runkernel-cli-support::RunkernelApp` to expose that protocol.
+The CLI discovers `runkernel.toml` by walking up from the current directory. It delegates to the configured Cargo binary with the internal `__runkernel` protocol for list, graph, explain, and selected task execution. Arguments after `--` on `runkernel run` are forwarded to workflow tasks and are available through `Context::args()`. Workflow binaries use `runkernel-cli-support::RunkernelApp` to expose that protocol.
 
 ## Current Limitations
 
 - runkernel is a local library, not a distributed workflow system.
 - Shell execution defaults to `sh -c`; Windows shells are modeled but not broadly tested.
 - Cache storage is local JSON under `.runkernel/cache`.
-- Function task caching requires explicit user cache keys.
+- Function task cache identity never includes the closure body; use explicit keys, inputs, or environment variables to describe invalidation.
 - The CLI runs Rust workflow binaries discovered through `runkernel.toml`; the manifest does not define tasks.
 - There is no remote worker, Kubernetes, web UI, plugin system, or YAML pipeline format.
 

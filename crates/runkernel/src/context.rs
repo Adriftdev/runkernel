@@ -13,6 +13,7 @@ pub struct Context {
     pub task_name: String,
     pub pipeline_name: String,
     pub workspace_root: PathBuf,
+    args: Vec<String>,
     outputs: OutputStore,
     completed: CompletedStore,
 }
@@ -24,6 +25,7 @@ impl Context {
             task_name: task_name.into(),
             pipeline_name: String::new(),
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            args: Vec::new(),
             outputs: Arc::new(RwLock::new(HashMap::new())),
             completed: Arc::new(RwLock::new(HashSet::new())),
         }
@@ -33,6 +35,7 @@ impl Context {
         task_name: impl Into<String>,
         pipeline_name: impl Into<String>,
         workspace_root: PathBuf,
+        args: Vec<String>,
         outputs: OutputStore,
         completed: CompletedStore,
     ) -> Self {
@@ -40,6 +43,7 @@ impl Context {
             task_name: task_name.into(),
             pipeline_name: pipeline_name.into(),
             workspace_root,
+            args,
             outputs,
             completed,
         }
@@ -58,6 +62,11 @@ impl Context {
     /// Gets the workspace root used for this pipeline run.
     pub fn workspace_root(&self) -> &std::path::Path {
         &self.workspace_root
+    }
+
+    /// Gets forwarded arguments supplied to this pipeline run.
+    pub fn args(&self) -> &[String] {
+        &self.args
     }
 
     /// Fetches an environment variable by name. Returns an error if not found.

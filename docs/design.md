@@ -16,7 +16,7 @@ The default is `FinishRunning`.
 
 ## Cache Model
 
-Tasks can use input-based caching, explicit cache keys, or disabled caching. Cache entries live under `.runkernel/cache/{pipeline_hash}/{task_name}.json`.
+Tasks can use input-based caching, explicit cache keys, or disabled caching. Cache entries live under `.runkernel/cache/{pipeline_hash}/` with filenames shaped as `{sanitized_task_name}-{task_hash16}.json`.
 
 Cache identity includes:
 
@@ -29,7 +29,7 @@ Cache identity includes:
 - declared input patterns
 - matched input file paths and file contents
 
-Missing glob matches are deterministic and do not fail. Invalid glob patterns return an error. Native function tasks cannot be hashed by code body, so explicit cache keys are the intended invalidation control for those tasks.
+Missing glob matches are deterministic and do not fail. Invalid glob patterns return an error. Native function tasks cannot be hashed by code body, so explicit cache keys, declared inputs, and declared environment variables are the intended invalidation controls for those tasks. Cache explanations mention when a native function task depends only on declared identity because the closure body is not hashed.
 
 ## Failure Model
 
@@ -47,7 +47,7 @@ Rollback failures are recorded on task results and do not hide the original task
 
 ## Context Model
 
-`Context` provides the current task name, pipeline name, workspace root, environment helpers, and typed task outputs.
+`Context` provides the current task name, pipeline name, workspace root, forwarded run arguments, environment helpers, and typed task outputs.
 
 Outputs are held in an in-memory shared store for the current run. Successful cached tasks restore cached outputs before dependents are scheduled, so downstream tasks can consume cached producer outputs.
 
@@ -65,4 +65,4 @@ The CLI should remain a thin wrapper over the library:
 
 `runkernel.toml` describes workflow binary locations, not task definitions. The CLI discovers the manifest, selects a workflow, and delegates to Cargo with protocol arguments after Cargo's `--`.
 
-Workflow binaries use `runkernel-cli-support::RunkernelApp` to expose `__runkernel metadata/list/graph/explain/run`. Machine-readable protocol commands return JSON, while `run` preserves normal workflow output and exit status.
+Workflow binaries use `runkernel-cli-support::RunkernelApp` to expose `__runkernel metadata/list/graph/explain/run`. Machine-readable protocol commands return JSON, while `run` preserves normal workflow output and exit status. Arguments after `--` in `runkernel run [task] -- ...` are forwarded through the protocol and exposed through `Context::args()`.
