@@ -96,6 +96,13 @@ impl CacheManager {
         clean_dir(self.pipeline_cache_dir(pipeline_name))
     }
 
+    pub fn is_cache_valid(&self, task_name: &str, current_hash: &str) -> bool {
+        matches!(
+            self.lookup(task_name, current_hash),
+            CacheLookup::Hit { .. }
+        )
+    }
+
     /// Computes cache eligibility and current task hash.
     pub fn compute_hash(
         &self,
