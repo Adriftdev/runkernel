@@ -1,11 +1,11 @@
+use crate::task::{Task, TaskAction};
+use glob::glob;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::SystemTime;
-use sha2::{Sha256, Digest};
-use glob::glob;
-use serde::{Serialize, Deserialize};
-use crate::task::{Task, TaskAction};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CacheEntry {
@@ -127,7 +127,11 @@ impl CacheManager {
                     continue;
                 }
                 Err(e) => {
-                    anyhow::bail!("Failed to open input file '{}' for hashing: {}", file_path.display(), e);
+                    anyhow::bail!(
+                        "Failed to open input file '{}' for hashing: {}",
+                        file_path.display(),
+                        e
+                    );
                 }
             };
 
@@ -136,7 +140,11 @@ impl CacheManager {
             let mut buffer = [0; 8192];
             loop {
                 let count = file.read(&mut buffer).map_err(|e| {
-                    anyhow::anyhow!("Failed to read input file '{}' for hashing: {}", file_path.display(), e)
+                    anyhow::anyhow!(
+                        "Failed to read input file '{}' for hashing: {}",
+                        file_path.display(),
+                        e
+                    )
                 })?;
                 if count == 0 {
                     break;
@@ -154,11 +162,10 @@ impl CacheManager {
 fn should_ignore_path(path: &std::path::Path) -> bool {
     for component in path.components() {
         if let std::path::Component::Normal(name) = component {
-            if let Some(name_str) = name.to_str() {
-                match name_str {
-                    "target" | "node_modules" | ".git" | ".rote" | ".cargo" | ".next" => return true,
-                    _ => {}
-                }
+            if let Some("target" | "node_modules" | ".git" | ".rote" | ".cargo" | ".next") =
+                name.to_str()
+            {
+                return true;
             }
         }
     }
@@ -179,15 +186,23 @@ mod tests {
 
     #[test]
     fn test_should_ignore_path() {
-        assert!(should_ignore_path(Path::new("services/drone/drone-ops/target/.rustc_info.json")));
+        assert!(should_ignore_path(Path::new(
+            "services/drone/drone-ops/target/.rustc_info.json"
+        )));
         assert!(should_ignore_path(Path::new("target/debug/deps/foo")));
-        assert!(should_ignore_path(Path::new("node_modules/lodash/index.js")));
+        assert!(should_ignore_path(Path::new(
+            "node_modules/lodash/index.js"
+        )));
         assert!(should_ignore_path(Path::new(".git/config")));
         assert!(should_ignore_path(Path::new(".rote/cache/foo.json")));
         assert!(should_ignore_path(Path::new(".cargo/config.toml")));
-        assert!(should_ignore_path(Path::new(".next/server/pages/index.html")));
+        assert!(should_ignore_path(Path::new(
+            ".next/server/pages/index.html"
+        )));
 
-        assert!(!should_ignore_path(Path::new("services/drone/drone-ops/src/main.rs")));
+        assert!(!should_ignore_path(Path::new(
+            "services/drone/drone-ops/src/main.rs"
+        )));
         assert!(!should_ignore_path(Path::new("src/lib.rs")));
         assert!(!should_ignore_path(Path::new("target_file.rs")));
         assert!(!should_ignore_path(Path::new("git_manager.rs")));
@@ -197,8 +212,7 @@ mod tests {
     fn test_compute_hash_ignores_missing_file_gracefully() {
         let manager = CacheManager::new();
         // A task with a non-existent file
-        let task = Task::new("test-task")
-            .inputs(&["this_file_does_not_exist_xyz.txt"]);
+        let task = Task::new("test-task").inputs(&["this_file_does_not_exist_xyz.txt"]);
 
         // Since the glob pattern won't find the file, it shouldn't fail
         let hash1 = manager.compute_hash(&task).unwrap();
