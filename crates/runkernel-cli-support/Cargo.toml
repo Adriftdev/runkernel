@@ -2,12 +2,18 @@
 name = "runkernel-cli-support"
 version = "0.1.0"
 edition = "2021"
+description = "Internal protocol support for runkernel workflow binaries"
+license = "MIT"
+repository = "https://github.com/Adriftdev/rote"
+readme = "../../README.md"
+keywords = ["workflow", "task-runner", "dag", "automation"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-runkernel = { path = "../runkernel" }
+runkernel = { version = "0.1.0", path = "../runkernel" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

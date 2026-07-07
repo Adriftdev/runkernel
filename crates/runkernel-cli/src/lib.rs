@@ -517,7 +517,7 @@ fn validate_metadata_response(
             metadata.protocol_version
         );
     }
-    if !capability.supported_by(&metadata) {
+    if !capability.supported_by(metadata) {
         anyhow::bail!(
             "Workflow '{}' is missing required runkernel protocol capability '{}'.",
             workflow_name,
