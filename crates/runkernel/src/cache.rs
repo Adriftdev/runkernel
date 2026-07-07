@@ -102,7 +102,7 @@ impl CacheManager {
         pipeline_name: &str,
         task: &Task,
     ) -> anyhow::Result<CacheEligibility> {
-        let is_native_function = matches!(task.action, Some(TaskAction::Fn(_)));
+        let is_native_function = matches!(&task.action, Some(TaskAction::Fn(_)));
         match &task.cache_mode {
             CacheMode::Disabled => {
                 return Ok(CacheEligibility::Disabled(
