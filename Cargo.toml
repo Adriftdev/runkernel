@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "rote",
+    "examples/ops",
+]
+resolver = "2"
