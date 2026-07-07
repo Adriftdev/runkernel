@@ -1,0 +1,7 @@
+[workflow.default]
+package = "ops"
+bin = "ops"
+manifest_path = "examples/ops/Cargo.toml"
+working_dir = "."
+default_task = "deploy-edge"
+description = "Example ops workflow"

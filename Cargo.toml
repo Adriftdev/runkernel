@@ -1,6 +1,13 @@
 [workspace]
 members = [
-    "rote",
+    "crates/runkernel",
+    "crates/runkernel-cli",
+    "crates/runkernel-cli-support",
+    "examples/basic",
+    "examples/cache",
+    "examples/outputs",
+    "examples/parallel",
     "examples/ops",
+    "examples/rollback",
 ]
 resolver = "2"

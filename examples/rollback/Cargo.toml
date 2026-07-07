@@ -1,11 +1,9 @@
 [package]
-name = "ops"
+name = "runkernel-example-rollback"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-runkernel = { path = "../../crates/runkernel" }
-runkernel-cli-support = { path = "../../crates/runkernel-cli-support" }
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0"
+runkernel = { path = "../../crates/runkernel" }
+tokio = { version = "1", features = ["full"] }

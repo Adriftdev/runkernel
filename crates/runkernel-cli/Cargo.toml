@@ -1,0 +1,17 @@
+[package]
+name = "runkernel-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "runkernel"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+runkernel = { path = "../runkernel" }
+runkernel-cli-support = { path = "../runkernel-cli-support" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"

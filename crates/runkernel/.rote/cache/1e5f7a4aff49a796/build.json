@@ -1,0 +1,8 @@
+{
+  "task_name": "build",
+  "hash": "4a5d5fbc31d2fca765881b309f5d9e11516342e450edbd0a8e64943eb186ae07",
+  "timestamp": 1783454929,
+  "outputs": {
+    "artifact": "dist/app.wasm"
+  }
+}
