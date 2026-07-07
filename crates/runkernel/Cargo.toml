@@ -1,6 +1,6 @@
 [package]
 name = "runkernel"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Rust-native workflow engine for defining, inspecting, and running task graphs"
 license = "MIT"
