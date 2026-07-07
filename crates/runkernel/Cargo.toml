@@ -2,6 +2,13 @@
 name = "runkernel"
 version = "0.1.0"
 edition = "2021"
+description = "Rust-native workflow engine for defining, inspecting, and running task graphs"
+license = "MIT"
+repository = "https://github.com/Adriftdev/rote"
+readme = "../../README.md"
+keywords = ["workflow", "task-runner", "dag", "automation"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [".rote/**", ".runkernel/**"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
