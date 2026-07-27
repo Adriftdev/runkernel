@@ -1,83 +1,43 @@
-# Runkernel: Pure-Rust Task Graph Engine for Build, Ops & Deployment
+# Agent Directives for Runkernel Development
 
-> **The Ethos:** Tooling should not force you into a proprietary configuration language (like YAML) when the host language is already expressive, typed, and testable.
+This repository contains **Runkernel**, a local-first, code-native Rust task graph engine. This document governs how AI agents should interact with, debug, and extend the engine's core source code across its workspace crates.
 
-This document serves as an architectural guide, developer manual, and design reference for AI agents and developers working on the `runkernel` codebase.
+## Technology Stack & Workspace
 
----
+- **Language:** Rust (Strictly enforced)
+- **Async Runtime:** Tokio (`futures::stream::FuturesUnordered`)
+- **Core Crates:**
+  - `crates/runkernel`: Core DAG scheduler, caching engine, and task state.
+  - `crates/runkernel-cli`: User-facing CLI and manifest discovery.
+  - `crates/runkernel-cli-support`: The `__runkernel` internal IPC protocol handler.
+- **Core Paradigms:** Type-safe DAG execution, deterministic SHA-256 caching, and strict separation between the CLI runner and the compiled workflow binaries.
 
-## 1. System Philosophy & Ethos
+## Concrete Execution Commands
 
-Modern infrastructure engineering suffers from "YAML inflation." We took serialization formats and forced them to handle loops, conditions, string interpolation, and dependency execution graphs. As a result:
+Do not guess command flags. Use these exact commands to validate the workspace:
 
-- We lose IDE autocompletion, hover documentation, and jump-to-definition.
-- We lose type-safety for parameters and environment variables.
-- We cannot easily write unit tests for deployment pipelines.
+- **Format check:** `cargo fmt --all -- --check`
+- **Linting:** `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- **Testing:** `cargo test --workspace`
+  _(Note: If running inside a sandboxed command runner, you must invoke tests with `BypassSandbox: true` to access standard toolchains)._
 
-`runkernel` returns control flow, dependency management, and execution orchestration back to **compiled Rust**. It acts as a lightweight, library-first orchestrator typically compiled inside an `ops/` or workflow binary in a repository.
+## Architectural Boundaries
 
----
+### 🔴 Never Do
 
-## 2. Core Architecture & Layout
+- **Never introduce distributed/remote execution:** Runkernel v0.1 is explicitly bounded as a local-first engine. Do not add Kubernetes backends, distributed queues, or remote worker logic to the core engine.
+- **Never parse YAML pipelines:** Rust is the absolute source of truth. `runkernel.toml` is strictly for manifest discovery and CLI defaults, not for defining tasks or dependencies.
+- **Never break the `__runkernel` protocol:** The `runkernel-cli` and `runkernel-cli-support` crates communicate via a hidden IPC protocol over stdout. Never write raw text to stdout in the support crate that breaks the expected JSON schema (`PROTOCOL_VERSION = 1`).
+- **Never block the Tokio executor:** The DAG scheduler (`pipeline.rs`) relies on asynchronous concurrency. Do not use blocking I/O or `std::thread::sleep` inside the execution loops.
 
-The project is structured as a Cargo workspace:
+### 🟡 Ask First
 
-```
-/Users/adrift/projects/rote/
-├── Cargo.toml                      # Workspace configuration
-├── crates/
-│   ├── runkernel/                  # Core library crate (Pipeline, Task, Context, CacheManager)
-│   │   └── src/
-│   │       ├── lib.rs              # Re-exports core types
-│   │       ├── context.rs          # Runtime state, inter-task outputs, env helpers
-│   │       ├── task.rs             # Task fluent builder, Shell enum, CacheMode
-│   │       ├── cache.rs            # Deterministic SHA-256 caching & file globbing
-│   │       └── pipeline.rs         # DAG execution loops, topological DFS sorting, rollback
-│   ├── runkernel-cli/              # User-facing CLI tool
-│   └── runkernel-cli-support/      # Support library for workflow binaries (__runkernel protocol)
-├── examples/                       # Executable example workflows (basic, cache, ops, outputs, parallel, rollback)
-├── .agents/skills/                 # AI Agent Skill definitions
-│   ├── runkernel-usage/SKILL.md    # Skill for consuming runkernel as a library
-│   └── runkernel-dev/SKILL.md      # Skill for developing and contributing to runkernel
-└── runkernel.toml                  # Workflow configuration manifest
-```
+- **Before modifying DFS Cycle Detection:** The topological sorting algorithm in `pipeline.rs` is critical for DAG validation. Propose algorithmic changes before modifying the `Unvisited/Visiting/Visited` state machine.
+- **Before changing Cache Identity rules:** Modifying how `cache.rs` computes the SHA-256 hash (involving globs, env vars, and shell commands) risks breaking cache determinism across the entire ecosystem.
+- **Before altering shared state:** Inter-task output passing relies on a thread-safe `Arc<Mutex<HashMap<...>>>`. Propose locking strategy changes before implementation to avoid deadlocks during parallel task execution.
 
----
+### 🟢 Always Do
 
-## 3. Agent Skills
-
-Agent skills are available in the repository to guide AI agents:
-
-- **Library Usage (`runkernel-usage`)**: See [.agents/skills/runkernel-usage/SKILL.md](.agents/skills/runkernel-usage/SKILL.md) for building workflows, defining shell and native async tasks, handling inputs/env vars, outputs, rollback, and CLI integration.
-- **Engine Development (`runkernel-dev`)**: See [.agents/skills/runkernel-dev/SKILL.md](.agents/skills/runkernel-dev/SKILL.md) for extending the DAG scheduler, cache manager, CLI protocol, topological sort, and running test suites.
-
----
-
-## 4. Run & Test Instructions
-
-### Running Tests
-
-To run all unit and integration tests across the workspace:
-
-```bash
-cargo test
-```
-
-### Running Example Workflows
-
-To run the sample infrastructure deployment binary:
-
-```bash
-cargo run -p ops
-```
-
-To run via `runkernel-cli`:
-
-```bash
-cargo run -p runkernel-cli -- list
-cargo run -p runkernel-cli -- run
-```
-
-### Testing Cache Hits
-
-Run `cargo run -p ops` twice in succession. The second time, cached tasks will be skipped with `[CACHE]` status.
+- **Maintain collision-safe cache logic:** When modifying cache storage, ensure paths remain sanitized and retain the 16-character hex hash suffix (`{sanitized_task_name}-{hash16}.json`) to prevent naming collisions.
+- **Propagate exact failure state:** Ensure that changes to task execution properly honor the `FailurePolicy` (`FailFast`, `FinishRunning`, `ContinueIndependent`) and correctly trigger the configured `RollbackPolicy`.
+- **Update Protocol Serializers:** If you add a new capability or attribute to `Task`, you must update the JSON serialization in `runkernel-cli-support` so the CLI can correctly render it in `runkernel explain` and `runkernel graph`.
